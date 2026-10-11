@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""JOUD — حالات حدّية وأمان (يعمل بعد e2e_http.py على نفس القاعدة التجريبية). تحذير: يعدّل بيانات الاختبار."""
+import os, re, struct, zlib, io
+exec(open(os.path.join(os.path.dirname(__file__), 'e2e_http.py')).read().split("print('== 1)")[0])
+a = C(); a.login('admin', PW)
+pid = val("select id from products where sku='SKU-A'"); cust = val("select id from customers where name='أحمد'"); today = val('select curdate()')
+def png():
+    raw = b'\x00\xff\x00\x00'; c = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+    return b'\x89PNG\r\n\x1a\n' + c(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)) + c(b'IDAT', zlib.compress(b'\x00\xff\x00\x00')) + c(b'IEND', b'')
+
+print('== XSS / SQL Injection')
+a.post('/products/', {'name': '<script>alert(1)</script>', 'sku': 'XSS-1', 'unit_id': val('select id from units limit 1'), 'base_price': 10, 'min_price': 5}, page='/products/')
+for p in ['/products/', '/inventory/', '/reports/?r=inventory', '/reports/?r=product', '/pos/api.php?q=xss', '/audit/']:
+    r = a.s.get(URL + p, headers={'Accept': 'application/json'} if 'api' in p else {}); check(f'XSS مُهرَّب في {p}', '<script>alert(1)</script>' not in r.text and clean(r.text))
+xid = val("select id from products where sku='XSS-1'"); a.post('/products/', {'act': 'delete', 'id': xid}, page='/products/'); check('حذف منتج بلا حركات يحذفه فعلًا', val("select count(*) from products where sku='XSS-1'") == '0')
+for p in ["/products/?q=' OR 1=1 --", "/sales/?q=%27%20OR%20%271%27=%271", "/audit/?q=%27;DROP TABLE users;--", "/customers/?q=%25", "/reports/?r=daily&f=2026-01-01' OR 1=1&t=x", "/reports/?r=../../etc/passwd", "/sales/invoice.php?id=1%20OR%201=1", "/inventory/?id=abc"]:
+    r = a.get(p); check(f'حقن SQL/مسارات غير ضارّ: {p[:45]}', r.status_code in (200, 404) and clean(r.text), str(r.status_code))
+check('جدول المستخدمين سليم بعد محاولات الحقن', int(val('select count(*) from users')) >= 2)
+
+print('== رفع الشعار (أمان)')
+r = a.post('/settings/', {'company_name': 'شركة الاختبار للبناء', 'currency': 'SDG', 'invoice_prefix': 'JB'}, page='/settings/', files={'logo': ('shell.png', b'<?php system($_GET[0]); ?>', 'image/png')})
+check('رفض ملف PHP متنكر كـ PNG', 'نوع الصورة غير مسموح' in r.text and not os.listdir('/home/claude/joud/uploads') or 'نوع الصورة' in r.text)
+r = a.post('/settings/', {'company_name': 'شركة الاختبار للبناء', 'currency': 'SDG', 'invoice_prefix': 'JB'}, page='/settings/', files={'logo': ('x.php', b'GIF89a<?php ?>', 'image/gif')}); check('رفض امتداد/نوع غير صالح', 'غير مسموح' in r.text)
+r = a.post('/settings/', {'company_name': 'شركة الاختبار للبناء', 'currency': 'SDG', 'invoice_prefix': 'JB'}, page='/settings/', files={'logo': ('logo.png', png(), 'image/png')})
+lg = val("select v from settings where k='logo'"); check('قبول PNG حقيقي بحفظ باسم عشوائي', bool(re.match(r'^logo_[0-9a-f]{12}\.png$', lg or '')))
+check('الشعار يظهر في الشريط الجانبي', '/uploads/' + (lg or 'x') in a.get('/').text)
+check('الشعار موجود في PDF (لا أخطاء)', a.get(f'/sales/pdf.php?id={val("select id from sales order by id desc limit 1")}').content[:5] == b'%PDF-')
+a.post('/settings/', {'company_name': 'شركة الاختبار للبناء', 'currency': 'SDG', 'invoice_prefix': 'JB', 'remove_logo': '1'}, page='/settings/'); check('إزالة الشعار تحذف الملف', val("select v from settings where k='logo'") in ('', None) and not os.path.exists('/home/claude/joud/uploads/' + (lg or 'nope')))
+
+print('== طرق الدفع الديناميكية')
+a.post('/payment_methods/', {'name': 'تطبيق بنكي', 'code': 'bankapp', 'is_active': 'on'}, page='/payment_methods/'); mid = val("select id from payment_methods where code='bankapp'"); check('إضافة طريقة دفع', mid is not None)
+check('تظهر تلقائيًا في POS', 'تطبيق بنكي' in a.get('/pos/').text)
+code, d = a.api([{'id': int(pid), 'qty': 1, 'price': 50000}], method=int(mid), paid=''); check('بيع بالطريقة الجديدة', code == 200)
+r = a.get('/reports/?r=methods&f=2020-01-01&t=2030-01-01'); check('تظهر في تقرير طرق الدفع', 'تطبيق بنكي' in r.text)
+check('تظهر في الفاتورة', 'تطبيق بنكي' in a.get(f"/sales/invoice.php?id={d['id']}").text)
+check('تظهر في لوحة التحكم (توزيع المبيعات)', 'تطبيق بنكي' in a.get('/?p=year').text)
+r = a.post('/payment_methods/', {'act': 'delete', 'id': mid}, page='/payment_methods/'); check('حذف طريقة دفع مستخدمة مرفوض', val(f'select count(*) from payment_methods where id={mid}') == '1')
+a.post('/payment_methods/', {'act': 'toggle', 'id': mid}, page='/payment_methods/'); check('تعطيل طريقة الدفع', val(f'select is_active from payment_methods where id={mid}') == '0')
+check('المعطّلة تختفي من POS', 'تطبيق بنكي' not in a.get('/pos/').text)
+code, d = a.api([{'id': int(pid), 'qty': 1, 'price': 50000}], method=int(mid), paid=''); check('API يرفض طريقة معطّلة', code == 422)
+for m in sql('select id from payment_methods where id<>' + mid): a.post('/payment_methods/', {'act': 'toggle', 'id': m[0]}, page='/payment_methods/')
+check('لا يمكن تعطيل آخر طريقة فعّالة', val('select count(*) from payment_methods where is_active=1') >= '1')
+
+print('== قواعد الحذف والتعطيل')
+cat = val("select category_id from products where sku='SKU-A'"); r = a.post('/categories/', {'act': 'delete', 'id': cat}, page='/categories/'); check('حذف تصنيف مرتبط بمنتجات مرفوض برسالة واضحة', val(f'select count(*) from categories where id={cat}') == '1' and 'لارتباطه' in r.text)
+bal = sql('select id from customers where balance>0 limit 1')
+if bal: a.post('/customers/', {'act': 'toggle', 'id': bal[0][0]}, page='/customers/'); check('لا تعطيل لعميل عليه رصيد', val(f'select is_active from customers where id={bal[0][0]}') == '1')
+r = a.post('/products/', {'act': 'delete', 'id': pid}, page='/products/'); check('منتج له حركات: يُعطَّل بدل الحذف', val(f'select status from products where id={pid}') == 'inactive' and val(f'select count(*) from products where id={pid}') == '1')
+code, d = a.api([{'id': int(pid), 'qty': 1, 'price': 50000}], paid=''); check('المنتج المعطّل لا يُباع', code == 422)
+a.post('/products/', {'act': 'toggle', 'id': pid}, page='/products/'); check('إعادة تفعيل المنتج', val(f'select status from products where id={pid}') == 'active')
+for p, n in [('/products/', pid), ('/customers/', cust), ('/suppliers/', val('select id from suppliers limit 1')), ('/units/', val('select id from units limit 1')), ('/payment_methods/', val('select id from payment_methods limit 1')), ('/expense_categories/', val('select id from expense_categories limit 1')), ('/users/', 1), ('/expenses/', val('select id from expenses where status="active" limit 1'))]:
+    r = a.get(f'{p}?edit={n}'); check(f'زر التعديل ?edit= يفتح النموذج: {p}', 'data-auto-open' in r.text and clean(r.text))
+
+print('== الشراء والإلغاء')
+sup = val('select id from suppliers limit 1'); st0 = float(val(f'select stock from products where id={pid}'))
+a.post('/purchases/', {'act': 'create', 'supplier_id': sup, 'ref': 'M-2', 'paid': 0, 'pid[]': [pid, pid], 'qty[]': ['5', '2'], 'cost[]': ['31000', '31000']}, page='/purchases/?new=1')
+pc = val('select id from purchases order by id desc limit 1'); check('شراء متعدد البنود يزيد المخزون 7', float(val(f'select stock from products where id={pid}')) == st0 + 7 and val(f'select count(*) from purchase_items where purchase_id={pc}') == '2')
+check('تحديث تكلفة المنتج آخر شراء', val(f'select cost_price from products where id={pid}') == '31000.00')
+a.post('/purchases/', {'act': 'cancel', 'id': pc, 'reason': 'خطأ بالإدخال'}, page=f'/purchases/?id={pc}'); check('إلغاء الشراء يُرجع المخزون', float(val(f'select stock from products where id={pid}')) == st0 and val(f'select status from purchases where id={pc}') == 'cancelled')
+check('المشتريات الملغاة لا تدخل التقرير الإجمالي', '62,000' not in re.sub('<[^>]+>', ' ', a.get('/reports/?r=purchases').text.split('kpi-label')[2][:200]))
+r = a.post('/purchases/', {'act': 'create', 'supplier_id': sup, 'paid': 999999999, 'pid[]': [pid], 'qty[]': ['1'], 'cost[]': ['10']}, page='/purchases/?new=1'); check('رفض مدفوع أكبر من إجمالي الشراء', 'أكبر من إجمالي الشراء' in r.text)
+
+print('== الصلاحيات الفورية (من القاعدة في كل طلب)')
+k = C(); k.login('cash1', CPW); check('الكاشير يفتح POS', k.get('/pos/').status_code == 200)
+rid = val("select id from roles where name='cashier'"); perm = val("select id from permissions where code='create_sale'")
+a.post('/roles/', {'id': rid, 'perms[]': [x[0] for x in sql(f"select permission_id from role_permissions where role_id={rid} and permission_id<>{perm}")]}, page=f'/roles/?id={rid}')
+check('سحب create_sale يسري فورًا (POS = 403)', k.get('/pos/').status_code == 403)
+code, d = k.api([{'id': int(pid), 'qty': 1, 'price': 50000}], paid=''); check('وAPI البيع = 403 من الخادم', code == 403, str(d))
+a.post('/roles/', {'id': rid, 'perms[]': [x[0] for x in sql(f"select permission_id from role_permissions where role_id={rid}")] + [perm]}, page=f'/roles/?id={rid}'); check('إرجاع الصلاحية', k.get('/pos/').status_code == 200)
+r = a.post('/roles/', {'id': val("select id from roles where name='admin'"), 'perms[]': []}, page='/roles/'); check('صلاحيات المدير لا تُعدَّل', val("select count(*) from role_permissions where role_id=(select id from roles where name='admin')") == val('select count(*) from permissions'))
+cu = val("select id from users where username='cash1'"); a.post('/users/', {'id': cu, 'username': 'cash1', 'full_name': 'كاشير 1', 'role_id': rid}, page='/users/')   # بلا is_active = تعطيل
+check('تعطيل المستخدم يُنهي جلسته فورًا', k.get('/', allow_redirects=False).status_code == 302)
+check('المعطّل لا يستطيع الدخول', 'غير صحيحة' in C().login('cash1', CPW).text)
+a.post('/users/', {'id': cu, 'username': 'cash1', 'full_name': 'كاشير 1', 'role_id': rid, 'is_active': 'on'}, page='/users/')
+
+print('== حماية الدخول (آخر اختبار)')
+x = C()
+for i in range(9): x.login('admin', 'wrong' + str(i))
+r = x.login('admin', PW); check('قفل مؤقت بعد محاولات فاشلة متعددة (حتى بكلمة صحيحة)', 'محاولات كثيرة' in r.text)
+sql("delete from audit_logs where action='login_failed'")
+check('الجلسة: ملف تعريف الارتباط HttpOnly + SameSite', 'httponly' in str(C().s.get(URL + '/login.php').headers.get('Set-Cookie', '')).lower() and 'samesite=lax' in str(C().s.get(URL + '/login.php').headers.get('Set-Cookie', '')).lower())
+check('كلمات المرور مخزّنة مشفّرة (bcrypt/argon)', all(v[0].startswith(('$2y$', '$argon')) for v in sql('select password_hash from users')))
+print(f'\nالنتيجة: نجح {ok} / فشل {bad}'); [print(' -', f) for f in fails]; sys.exit(1 if bad else 0)

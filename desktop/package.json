@@ -1,0 +1,38 @@
+{
+  "name": "joud-desktop",
+  "productName": "JOUD",
+  "version": "1.0.0",
+  "description": "JOUD Desktop — غلاف سطح مكتب لنظام JOUD الحالي (PHP + MySQL على WAMP)",
+  "main": "main.js",
+  "private": true,
+  "author": "JOUD",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder --win portable nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "sd.joud.desktop",
+    "productName": "JOUD",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "lib.js", "preload.js", "pages/**", "package.json"],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": ["portable", "nsis"]
+    },
+    "portable": { "artifactName": "JOUD.exe" },
+    "nsis": {
+      "artifactName": "JOUD-Setup.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "JOUD"
+    }
+  }
+}

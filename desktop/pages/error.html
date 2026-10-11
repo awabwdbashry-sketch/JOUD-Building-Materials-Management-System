@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>JOUD</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;background:#f4f5f7;color:#0f1a2e;font-family:Tahoma,Segoe UI,sans-serif}
+.card{background:#fff;border-radius:12px;box-shadow:0 4px 24px #0001;padding:32px 40px;max-width:560px;text-align:center}
+h2{margin:0 0 10px}p{margin:8px 0;color:#475467;line-height:1.8}code{direction:ltr;display:inline-block;background:#f2f4f7;padding:2px 8px;border-radius:6px;font-size:13px}
+button{font:inherit;margin:14px 6px 0;padding:9px 22px;border-radius:8px;border:1px solid #c9a24a;cursor:pointer}.p{background:#c9a24a;color:#fff}.s{background:#fff;color:#0f1a2e}
+</style></head><body><div class="card"><h2 id="t">تعذّر الوصول إلى النظام</h2><p id="d"></p>
+<p>الرابط المستخدم: <code id="u"></code></p><p style="font-size:13px">ملف الإعدادات: <code id="c"></code></p>
+<button class="p" onclick="joudDesktop.retry()">إعادة المحاولة</button><button class="s" onclick="joudDesktop.openConfig()">فتح ملف الإعدادات</button><button class="s" onclick="joudDesktop.quit()">إغلاق</button></div>
+<script>if(window.joudDesktop)joudDesktop.onError(function(i){var s=function(id,v){document.getElementById(id).textContent=v||''};s('t',i.title);s('d',i.detail);s('u',i.url);s('c',i.config)});</script></body></html>

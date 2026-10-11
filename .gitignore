@@ -1,0 +1,28 @@
+﻿# Local configuration and secrets
+/config/config.php
+.env
+.env.*
+!.env.example
+
+# Dependencies and generated files
+node_modules/
+vendor/
+desktop/node_modules/
+desktop/dist/
+desktop/build/
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Uploaded user content (keep protection rules)
+uploads/*
+!uploads/.htaccess
+
+# Local database backups and exports
+*.bak
+*.dump
+
+tests/legacy_seed.sql

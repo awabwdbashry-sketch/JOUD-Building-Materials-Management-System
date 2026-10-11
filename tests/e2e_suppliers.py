@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+JOUD — اختبار الموردين والمشتريات والدفعات (يعمل على قاعدة اختبار فيها المدير admin والكاشير cash1 من e2e_http.py).
+تحذير: ينشئ بيانات تجريبية. لا تشغّله على قاعدة الإنتاج.
+"""
+import os, re, subprocess, json
+exec(open(os.path.join(os.path.dirname(__file__), 'e2e_http.py')).read().split("print('== 1)")[0])
+import time
+U = str(int(time.time()) % 100000)
+N1, N2 = 'مورد الاختبار ' + U, 'مورد الكشف ' + U
+a = C(); a.login('admin', PW)
+today = val('select curdate()'); pid = val("select id from products where sku='SKU-A'")
+def stock(p=None): return float(val(f'select stock from products where id={p or pid}'))
+def bal(s): return val(f'select balance from suppliers where id={s}')
+def pur(s, qty, cost, paid=0, method=1, ref='T'):
+    a.post('/purchases/', {'act': 'create', 'supplier_id': s, 'ref': ref, 'paid': paid, 'method_id': method, 'pid[]': [pid], 'qty[]': [str(qty)], 'cost[]': [str(cost)]}, page='/purchases/?new=1')
+    return val('select max(id) from purchases')
+def pay(p, amt, method=1, date=None, ref='', notes='', page=None):
+    return a.post(f'/purchases/?id={p}', {'act': 'pay', 'id': p, 'amount': amt, 'method_id': method, 'date': date or today, 'reference': ref, 'notes': notes}, page='/settings/')
+def row(p): return sql(f'select total,paid,pay_status,status from purchases where id={p}')[0]
+def text(r): return re.sub(r'\s+', ' ', re.sub('<[^>]+>', ' ', r.text))
+
+sql('update payment_methods set is_active=1')
+UPG = os.environ.get('JOUD_UPGRADED') == '1'   # =1 عند التشغيل على قاعدة رُقّيت في مكانها من v2
+print('== 0) الترقية في المكان حفظت البيانات القديمة')
+check('الإصدار 3', val("select v from settings where k='schema_version'") == '3')
+if UPG:
+    check('الدفعة القديمة صارت سجلًا في supplier_payments', val('select count(*) from supplier_payments where purchase_id=1 and type=\'initial\'') == '1')
+    check('رصيد المورد القديم = إجمالي الشراء − المدفوع', bal(1) == '200000.00')
+    check('صفحات الموردين والمشتريات القديمة تعمل', all(a.get(p).status_code == 200 and clean(a.get(p).text) for p in ['/suppliers/', '/suppliers/view.php?id=1', '/suppliers/statement.php?id=1', '/purchases/', '/purchases/?id=1', '/purchases/?id=2']))
+    check('فحص السلامة بعد الترقية', 'لا توجد مشاكل' in a.get('/settings/?check=1').text)
+
+print('== 1) المورد')
+a.post('/suppliers/', {'name': N1, 'phone': '0123123123', 'address': 'بحري', 'is_active': 'on'}, page='/suppliers/'); S = val("select id from suppliers where name='" + N1 + "'"); check('إضافة مورد', S is not None)
+a.post('/suppliers/', {'id': S, 'name': N1, 'phone': '0124124124', 'address': 'بحري', 'is_active': 'on'}, page='/suppliers/'); check('تعديل مورد (زر Edit)', val(f'select phone from suppliers where id={S}') == '0124124124' and 'data-auto-open' in a.get(f'/suppliers/?edit={S}').text)
+check('بحث الموردين', N1 in a.get('/suppliers/?q=' + N1).text and N1 not in a.get('/suppliers/?q=لايوجد').text)
+check('عمود رصيد المورد وأزرار التفاصيل/الكشف/شراء في القائمة', all(x in a.get('/suppliers/').text for x in ['المستحق للمورد', 'view.php?id=', 'statement.php?id=', 'new=1&supplier=']))
+check('رفض هاتف غير صالح', 'الهاتف غير صالح' in a.post('/suppliers/', {'name': 'x', 'phone': 'abc'}, page='/suppliers/').text)
+
+print('== 2) الحالات المطلوبة')
+st0 = stock()
+P1 = pur(S, 10, 10000, 100000, 1); check('Case1: 100000 مدفوع بالكامل: متبقي 0 وحالة paid', row(P1) == ['100000.00', '100000.00', 'paid', 'active'] and bal(S) == '0.00')
+r = a.get(f'/purchases/?id={P1}'); check('Case1: الصفحة "مدفوعة بالكامل" وبلا زر تسجيل دفعة', 'مدفوعة بالكامل' in r.text and 'تسجيل دفعة جديدة' not in r.text and 'payModal' not in r.text)
+r = pay(P1, 1); check('Case1: دفعة على فاتورة مدفوعة مرفوضة', 'مدفوعة بالكامل' in r.text and row(P1)[1] == '100000.00')
+check('المخزون زاد 10', stock() == st0 + 10)
+P2 = pur(S, 10, 10000, 0); check('Case2: آجل: متبقي 100000 وحالة credit', row(P2) == ['100000.00', '0.00', 'credit', 'active'] and bal(S) == '100000.00' and val(f'select count(*) from supplier_payments where purchase_id={P2}') == '0')
+r = a.get(f'/purchases/?id={P2}'); check('Case2: الصفحة تعرض "آجلة" وزر تسجيل دفعة جديدة وPDF وطباعة وإلغاء', all(x in r.text for x in ['آجلة', 'تسجيل دفعة جديدة', 'pdf.php?id=', 'طباعة', 'إلغاء الفاتورة']))
+P3 = pur(S, 10, 10000, 30000, 1); check('Case3: جزئي 30000 → متبقي 70000 وحالة partial', row(P3) == ['100000.00', '30000.00', 'partial', 'active'] and bal(S) == '170000.00')
+# Case 4
+check('Case4: دفعة 20000 نقدًا', 'المتبقي على الفاتورة: 50,000' in text(pay(P3, 20000, 1, ref='R1', notes='n')) and row(P3)[1:3] == ['50000.00', 'partial'] and bal(S) == '150000.00')
+r = pay(P3, 50000, 2, ref='BNK-9'); check('Case4: دفعة 50000 بنك → مدفوعة بالكامل', row(P3) == ['100000.00', '100000.00', 'paid', 'active'] and 'مدفوعة بالكامل' in text(r) and bal(S) == '100000.00')
+check('Case4: ثلاث دفعات بطرق مختلفة محفوظة', sql(f'select type,amount,payment_method_id from supplier_payments where purchase_id={P3} order by id') == [['initial', '30000.00', '1'], ['payment', '20000.00', '1'], ['payment', '50000.00', '2']])
+check('Case4: الصفحة تعرض سجل الدفعات والبنك والمرجع', all(x in a.get(f'/purchases/?id={P3}').text for x in ['سجل الدفعات', 'BNK-9', 'دفعة لاحقة']) and 'تسجيل دفعة جديدة' not in a.get(f'/purchases/?id={P3}').text)
+# Case 5 + التحقق
+P5 = pur(S, 10, 10000, 0); b0 = bal(S); n0 = val('select count(*) from supplier_payments')
+r = pay(P5, 100001); check('Case5: دفعة 100001 مرفوضة بالعربية', 'أكبر من المتبقي' in text(r) and row(P5)[1] == '0.00')
+for name, args, msg in [('سالبة', dict(amt=-5), 'أكبر من صفر'), ('صفر', dict(amt=0), 'أكبر من صفر'), ('طريقة غير موجودة', dict(amt=10, method=999), 'طريقة الدفع غير صالحة'), ('نص', dict(amt='abc'), 'غير صالح')]:
+    r = pay(P5, args['amt'], args.get('method', 1)); check(f'تحقق: دفعة {name} مرفوضة', msg in text(r))
+r = pay(P5, 10, 1, date=sql("select date_add(curdate(),interval 3 day)")[0][0]); check('تحقق: تاريخ مستقبلي مرفوض', 'مستقبلي' in text(r))
+r = pay(P5, 10, 1, date='2000-01-01'); check('تحقق: تاريخ قبل تاريخ الفاتورة مرفوض', 'يسبق' in text(r))
+a.post('/payment_methods/', {'act': 'toggle', 'id': 3}, page='/payment_methods/'); r = pay(P5, 10, 3); check('تحقق: طريقة دفع معطّلة مرفوضة', 'غير صالحة' in text(r)); a.post('/payment_methods/', {'act': 'toggle', 'id': 3}, page='/payment_methods/')
+check('لا أثر لأي دفعة مرفوضة (لا صفوف ولا تغيير رصيد)', val('select count(*) from supplier_payments') == n0 and bal(S) == b0 and row(P5)[1] == '0.00')
+pay(P5, 99999.5); check('دفعة بكسور مقبولة ثم المتبقي 0.50', row(P5)[1] == '99999.50' and row(P5)[2] == 'partial'); r = pay(P5, 0.51); check('0.51 أكبر من المتبقي 0.50 مرفوضة', 'أكبر من المتبقي' in text(r)); pay(P5, 0.5); check('الدفعة الأخيرة 0.50 تُكمل السداد', row(P5)[2] == 'paid')
+
+print('== 3) الإلغاء (Case 6)')
+st1 = stock(); b1 = bal(S)
+P6 = pur(S, 4, 25000, 30000, 1); pay(P6, 20000, 2)
+check('قبل الإلغاء: مخزون +4، رصيد المورد +50000 (100000-50000)', stock() == st1 + 4 and bal(S) == f'{float(b1) + 50000:.2f}')
+r = a.post('/purchases/', {'act': 'cancel', 'id': P6, 'reason': 'خطأ في الطلب'}, page=f'/purchases/?id={P6}')
+check('الإلغاء: المخزون يعود', stock() == st1)
+check('الإلغاء: الحالة cancelled', row(P6)[3] == 'cancelled')
+check('الإلغاء: رصيد المورد يعود كما كان (صحيح رياضيًا)', bal(S) == b1)
+check('الإلغاء: سجل الدفعات محفوظ + عكس بنفس الطرق (30000 نقد، 20000 بنك)', sql(f'select type,amount,payment_method_id from supplier_payments where purchase_id={P6} order by id') == [['initial', '30000.00', '1'], ['payment', '20000.00', '2'], ['reversal', '-30000.00', '1'], ['reversal', '-20000.00', '2']])
+check('الإلغاء: صافي الدفعات = 0 فلا دين وهمي', val(f'select sum(amount) from supplier_payments where purchase_id={P6}') == '0.00')
+check('الإلغاء: رسالة تذكر الاسترداد 50,000', '50,000' in text(r))
+check('الإلغاء: حركة مخزون purchase_cancel', val(f"select count(*) from inventory_movements where type='purchase_cancel' and ref_id={P6}") == '1')
+check('الإلغاء: سجل التدقيق', val(f"select count(*) from audit_logs where action='purchase_cancelled' and entity_id={P6}") == '1')
+r = pay(P6, 1); check('دفعة على فاتورة ملغاة مرفوضة', 'ملغاة' in text(r) and row(P6)[1] == '0.00')
+r = a.get(f'/purchases/?id={P6}'); check('الصفحة الملغاة: بلا زر دفعة وبلا نموذج إلغاء ومع ختم وسبب', 'تسجيل دفعة جديدة' not in r.text and 'payModal' not in r.text and 'إلغاء الفاتورة' not in r.text.split('<form')[-1] and 'خطأ في الطلب' in r.text and clean(r.text))
+check('لا يمكن إلغاء مرتين', 'لا يمكن إلغاء' in a.post('/purchases/', {'act': 'cancel', 'id': P6, 'reason': 'x'}, page='/settings/').text)
+check('PDF فاتورة ملغاة', a.get(f'/purchases/pdf.php?id={P6}').content[:5] == b'%PDF-')
+
+print('== 4) ذرّية الإلغاء عند فشل المخزون (Rollback)')
+a.post('/products/', {'name': 'منتج ذرّية', 'sku': 'ATOM-' + U, 'unit_id': val('select id from units limit 1'), 'base_price': 100, 'min_price': 50, 'cost_price': 10, 'stock': 0}, page='/products/'); AP = val("select id from products where sku='ATOM-" + U + "'")
+a.post('/purchases/', {'act': 'create', 'supplier_id': S, 'paid': 100, 'method_id': 1, 'pid[]': [AP], 'qty[]': ['5'], 'cost[]': ['100']}, page='/purchases/?new=1'); PA = val('select max(id) from purchases')
+code, d = a.api([{'id': int(AP), 'qty': 3, 'price': 100}], paid=''); check('بيع 3 من المنتج المشترى', code == 200)
+bb = bal(S); nrows = val('select count(*) from supplier_payments')
+r = a.post('/purchases/', {'act': 'cancel', 'id': PA, 'reason': 'محاولة'}, page=f'/purchases/?id={PA}')
+check('الإلغاء مرفوض لأن المخزون لا يكفي', 'غير كافٍ' in text(r))
+check('Rollback: الفاتورة نشطة + المخزون 2 + لا صفوف عكس + الرصيد ثابت', row(PA)[3] == 'active' and stock(AP) == 2 and val('select count(*) from supplier_payments') == nrows and bal(S) == bb)
+
+print('== 5) Rollback عند فشل قاعدة البيانات في منتصف دفعة (Trigger يفرض خطأ)')
+P7 = pur(S, 1, 1000, 0); b7 = bal(S)
+subprocess.run(['mysql', '-uroot', DB], input="DELIMITER //\ncreate trigger t_fail before insert on audit_logs for each row begin if new.action='supplier_payment' then signal sqlstate '45000' set message_text='forced'; end if; end//\nDELIMITER ;\n", text=True)
+r = pay(P7, 500); check('رسالة خطأ عربية دون انهيار', 'لم يُحفظ أي شيء' in text(r))
+check('Rollback: لا دفعة، الفاتورة والرصيد كما هما', row(P7)[1] == '0.00' and val(f'select count(*) from supplier_payments where purchase_id={P7}') == '0' and bal(S) == b7)
+subprocess.run(['mysql', '-uroot', DB, '-e', 'drop trigger t_fail'])
+pay(P7, 500); check('بعد زوال العطل تنجح الدفعة', row(P7)[1] == '500.00')
+
+print('== 6) كشف حساب المورد (ويب = PDF = CSV)')
+S2 = None
+a.post('/suppliers/', {'name': N2, 'is_active': 'on'}, page='/suppliers/'); S2 = val("select id from suppliers where name='" + N2 + "'")
+K = pur(S2, 10, 10000, 30000, 1, 'STM'); pay(K, 20000, 1); pay(K, 10000, 2)
+r = a.get(f'/suppliers/statement.php?id={S2}'); tx = text(r)
+check('الكشف: شراء 100,000 ثم دفعات 30,000 / 20,000 / 10,000 والرصيد 70,000 ثم 50,000 ثم 40,000', all(x in tx for x in ['100,000', '30,000', '20,000', '10,000', '70,000', '50,000', '40,000']) and clean(r.text))
+check('الكشف: الملخص (مشتريات 100,000 / مدفوعات 60,000 / مستحق 40,000)', 'إجمالي المشتريات 100,000' in tx.replace('SDG', '').replace('  ', ' ') or ('100,000' in tx and '60,000' in tx and '40,000' in tx))
+check('الرصيد الختامي في الكشف = رصيد المورد في القاعدة', bal(S2) == '40000.00')
+open('/tmp/stm_sup.pdf', 'wb').write(a.get(f'/suppliers/statement.php?id={S2}&fmt=pdf').content)
+pt = subprocess.run(['pdftotext', '-layout', '/tmp/stm_sup.pdf', '-'], capture_output=True, text=True).stdout
+check('PDF الكشف حقيقي ويحوي نفس الأرقام (100,000 / 60,000 / 40,000 / 70,000 / 50,000)', open('/tmp/stm_sup.pdf', 'rb').read(5) == b'%PDF-' and all(x in pt for x in ['100,000', '60,000', '40,000', '70,000', '50,000']), pt[:300])
+csvtxt = a.get(f'/suppliers/statement.php?id={S2}&fmt=csv').content.decode('utf-8-sig'); check('CSV الكشف يطابق (آخر رصيد 40000)', csvtxt.strip().splitlines()[-1].endswith('40000') or '40,000' in csvtxt.strip().splitlines()[-1] or '40000' in csvtxt)
+r = a.get(f'/suppliers/statement.php?id={S2}&f=2099-01-01'); check('فلتر التاريخ: الرصيد السابق = 40,000 بلا حركات', '40,000' in text(r) and 'رصيد سابق' in text(r))
+r = a.get(f'/suppliers/view.php?id={S2}'); check('تفاصيل المورد: مشتريات/مدفوع/مستحق وقوائم الفواتير والدفعات', all(x in text(r) for x in ['100,000', '60,000', '40,000', 'PUR-']) and 'كشف الحساب' in r.text and clean(r.text))
+check('مورد له رصيد: التعطيل مرفوض', 'له رصيد' in a.post('/suppliers/', {'act': 'toggle', 'id': S2}, page='/suppliers/').text and val(f'select is_active from suppliers where id={S2}') == '1')
+check('مورد له فواتير: الحذف مرفوض', val(f'select count(*) from suppliers where id={S2}') == '1' and ('لارتباطه' in a.post('/suppliers/', {'act': 'delete', 'id': S2}, page='/suppliers/').text))
+
+print('== 7) PDF فاتورة الشراء')
+a.post('/settings/', {'company_name': 'شركة الاختبار للبناء', 'phone': '0999888777', 'currency': 'SDG', 'invoice_prefix': 'JB', 'address': 'الخرطوم'}, page='/settings/')
+r = a.get(f'/purchases/pdf.php?id={K}'); open('/tmp/pur_k.pdf', 'wb').write(r.content)
+pt = subprocess.run(['pdftotext', '-layout', '/tmp/pur_k.pdf', '-'], capture_output=True, text=True).stdout
+check('PDF الشراء حقيقي', r.content[:5] == b'%PDF-' and 'attachment' in r.headers.get('content-disposition', ''))
+check(f'PDF يحوي رقم الفاتورة PUR-{int(K):05d} والإجمالي 100,000 والمدفوع 60,000 والمتبقي 40,000', f'PUR-{int(K):05d}' in pt and all(x in pt for x in ['100,000', '60,000', '40,000']), pt[:400])
+check('PDF يحوي معلومات الشركة من الإعدادات', '0999888777' in pt)
+
+print('== 8) الصلاحيات (الخادم)')
+k = C(); k.login('cash1', CPW)
+for p in ['/purchases/', f'/purchases/?id={K}', f'/purchases/pdf.php?id={K}', '/suppliers/', f'/suppliers/view.php?id={S2}', f'/suppliers/statement.php?id={S2}', f'/suppliers/statement.php?id={S2}&fmt=pdf', '/reports/?r=suppliers', '/reports/?r=supplier_payments']:
+    check(f'كاشير محجوب: {p}', k.get(p, allow_redirects=False).status_code == 403)
+r = k.post(f'/purchases/?id={K}', {'act': 'pay', 'id': K, 'amount': 1, 'method_id': 1, 'date': today}, page='/settings/'); b = row(K); check('كاشير لا يستطيع POST دفعة', b[1] == '60000.00')
+rid = val("select id from roles where name='cashier'"); allp = [x[0] for x in sql(f'select permission_id from role_permissions where role_id={rid}')]; vp = val("select id from permissions where code='view_purchases'"); pp = val("select id from permissions where code='pay_supplier'"); cp = val("select id from permissions where code='cancel_purchase'")
+a.post('/roles/', {'id': rid, 'perms[]': allp + [vp]}, page=f'/roles/?id={rid}')
+r = k.get(f'/purchases/?id={K}'); check('بصلاحية view_purchases فقط: يرى الفاتورة بلا زر دفعة ولا إلغاء', r.status_code == 200 and 'تسجيل دفعة جديدة' not in r.text and 'إلغاء الفاتورة' not in r.text and 'pdf.php' in r.text)
+r = k.post(f'/purchases/?id={K}', {'act': 'pay', 'id': K, 'amount': 1, 'method_id': 1, 'date': today}, page=f'/purchases/?id={K}'); check('وPOST الدفع مرفوض من الخادم برسالة صلاحية', 'صلاحية' in text(r) and row(K)[1] == '60000.00')
+r = k.post(f'/purchases/?id={K}', {'act': 'cancel', 'id': K, 'reason': 'x'}, page=f'/purchases/?id={K}'); check('وإلغاء الشراء مرفوض', row(K)[3] == 'active')
+a.post('/roles/', {'id': rid, 'perms[]': allp + [vp, pp]}, page=f'/roles/?id={rid}')
+r = k.get(f'/purchases/?id={K}'); check('بإضافة pay_supplier يظهر الزر', 'تسجيل دفعة جديدة' in r.text)
+r = k.post(f'/purchases/?id={K}', {'act': 'pay', 'id': K, 'amount': 5000, 'method_id': 1, 'date': today}, page=f'/purchases/?id={K}'); check('وتنجح الدفعة (صلاحية معاد استخدامها بدل نسخها)', row(K)[1] == '65000.00')
+check('الصلاحية الجديدة الوحيدة pay_supplier وللمدير تلقائيًا', val("select count(*) from role_permissions rp join roles r on r.id=rp.role_id join permissions p on p.id=rp.permission_id where r.name='admin' and p.code='pay_supplier'") == '1')
+a.post('/roles/', {'id': rid, 'perms[]': allp}, page=f'/roles/?id={rid}'); check('إعادة صلاحيات الكاشير الأصلية', k.get('/purchases/', allow_redirects=False).status_code == 403)
+r = a.s.post(URL + f'/purchases/?id={K}', data={'act': 'pay', 'id': K, 'amount': 1, 'method_id': 1, 'date': today}); check('POST دفعة بلا CSRF = 419', r.status_code == 419 and row(K)[1] == '65000.00')
+
+print('== 9) التدقيق والتقارير ولوحة التحكم')
+r = a.get('/audit/'); t = text(r)
+check('التدقيق: دفعة لمورد + إلغاء فاتورة شراء + إنشاء فاتورة شراء بالعربية', all(x in t for x in ['دفعة لمورد', 'إلغاء فاتورة شراء', 'تسجيل فاتورة شراء', 'المتبقي بعد الدفعة', 'رصيد المورد بعد العملية']))
+check('التدقيق بلا JSON ولا مفاتيح خام', not re.search(r'\{"[a-z_]+":', r.text) and 'remaining_after' not in r.text and 'supplier_payment' not in r.text.split('<select')[0] and clean(r.text))
+for q in ['?a=supplier_payment', '?a=purchase_cancelled']: check(f'تصفية التدقيق {q}', a.get('/audit/' + q).status_code == 200)
+check('سجل تدقيق دفعة المورد يحوي بيانات صحيحة', val("select count(*) from audit_logs where action='supplier_payment' and details like '%remaining_after%'") != '0')
+for rr in ['suppliers', 'supplier_payments', 'purchases', 'methods', 'expenses']:
+    base = f'/reports/?r={rr}' + ('&f=2020-01-01&t=2030-01-01' if rr != 'suppliers' else '')
+    rp = a.get(base); pdf = a.get(base + '&fmt=pdf'); csv = a.get(base + '&fmt=csv')
+    check(f'تقرير {rr}: صفحة + PDF + CSV', rp.status_code == 200 and clean(rp.text) and pdf.content[:5] == b'%PDF-' and csv.headers.get('content-type', '').startswith('text/csv'))
+check('تقرير الموردين يعرض رصيد المورد كما في القاعدة', f'{float(bal(S2)):,.0f}' in text(a.get('/reports/?r=suppliers&q=' + N2)))
+check('تقرير طرق الدفع يتضمن "مدفوع للموردين"', 'مدفوع للموردين' in a.get('/reports/?r=methods&f=2020-01-01&t=2030-01-01').text)
+check('تقرير المشتريات يفلتر بحالة partial', 'مدفوعة جزئيًا' in a.get('/reports/?r=purchases&f=2020-01-01&t=2030-01-01&pstatus=partial').text)
+dash = a.get('/?p=year'); debt = float(val('select coalesce(sum(balance),0) from suppliers where balance>0'))
+check('لوحة التحكم: مستحقات الموردين = مجموع الأرصدة في القاعدة', 'مستحقات الموردين' in dash.text and f'{debt:,.0f}' in dash.text)
+sp = float(val('select coalesce(sum(amount),0) from supplier_payments where year(payment_date)=year(curdate())')); check('لوحة التحكم: المدفوع للموردين = صافي دفعات الموردين', f'{sp:,.0f}' in dash.text)
+
+print('== 10) سلامة البيانات الكلية')
+check('فحص السلامة: لا مشاكل', 'لا توجد مشاكل' in a.get('/settings/?check=1').text, re.sub('<[^>]+>', ' ', a.get('/settings/?check=1').text)[-400:])
+check('كل رصيد مورد = المحسوب من الفواتير والدفعات', val("select count(*) from suppliers s where abs(s.balance-(coalesce((select sum(total) from purchases where supplier_id=s.id and status='active'),0)-coalesce((select sum(amount) from supplier_payments where supplier_id=s.id),0)))>0.004") == '0')
+check('كل فاتورة: paid = مجموع الدفعات، والحالة تطابق', val("select count(*) from purchases p where abs(p.paid-coalesce((select sum(amount) from supplier_payments where purchase_id=p.id),0))>0.004 or (p.status='active' and p.pay_status<>case when p.paid>=p.total-0.004 then 'paid' when p.paid>0.004 then 'partial' else 'credit' end)") == '0')
+check('لا فاتورة نشطة مدفوعها أكبر من إجماليها', val("select count(*) from purchases where status='active' and paid>total+0.004") == '0')
+check('رصيد المخزون = مجموع الحركات', val('select count(*) from products p where abs(p.stock-(select coalesce(sum(qty),0) from inventory_movements where product_id=p.id))>0.0009') == '0')
+print(f'\nالنتيجة: نجح {ok} / فشل {bad}'); [print(' -', f) for f in fails]; sys.exit(1 if bad else 0)
